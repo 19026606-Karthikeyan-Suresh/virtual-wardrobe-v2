@@ -8,18 +8,9 @@ export class VTOError extends Error {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Garment category → try-on mode mapping
-// ---------------------------------------------------------------------------
-
 export type VTOCategory = 'upper_body' | 'lower_body' | 'full_body'
 
 const HF_SPACE_IDM_VTON = 'yisol/IDM-VTON'
-const HF_SPACE_CATVTON = 'zhengchong/CatVTON'
-
-// ---------------------------------------------------------------------------
-// IDM-VTON — upper-body try-on (existing logic)
-// ---------------------------------------------------------------------------
 
 async function generateWithIDMVTON(
   modelImageUrl: string,
@@ -70,63 +61,79 @@ async function generateWithIDMVTON(
   return { resultUrl, generationMs }
 }
 
-// ---------------------------------------------------------------------------
-// CatVTON — supports upper, lower, and full body try-on
-// ---------------------------------------------------------------------------
+async function downloadImageBuffer(url: string): Promise<Buffer> {
+  const res = await fetch(url)
+  if (!res.ok) throw new VTOError(`Failed to download image: ${res.status}`)
+  const arrayBuffer = await res.arrayBuffer()
+  return Buffer.from(arrayBuffer)
+}
 
-async function generateWithCatVTON(
+async function generateWithOpenAI(
   modelImageUrl: string,
   garmentImageUrl: string,
-  clothType: 'upper' | 'lower' | 'overall',
+  category: 'lower_body' | 'full_body',
 ): Promise<{ resultUrl: string; generationMs: number }> {
   const started = Date.now()
 
-  const timeout = new Promise<never>((_, reject) =>
-    setTimeout(
-      () => reject(new VTOError(`VTO timed out after ${VTO_TIMEOUT_MS}ms`)),
-      VTO_TIMEOUT_MS,
-    ),
-  )
+  const apiKey = process.env.OPENAI_API_KEY
+  if (!apiKey) {
+    throw new VTOError('OPENAI_API_KEY is not configured')
+  }
 
-  const hfToken = process.env.HF_TOKEN
-  const app = await Client.connect(HF_SPACE_CATVTON, {
-    ...(hfToken ? { token: hfToken as `hf_${string}` } : {}),
-  })
-
-  const result = await Promise.race([
-    app.predict('/submit', [
-      handle_file(modelImageUrl),   // person image
-      handle_file(garmentImageUrl), // garment image
-      clothType,                    // "upper", "lower", or "overall"
-      50,                           // num_inference_steps
-      2.5,                          // guidance_scale
-      42,                           // seed
-      true,                         // show_type (return overlaid result)
-    ]),
-    timeout,
+  const [personBuffer, garmentBuffer] = await Promise.all([
+    downloadImageBuffer(modelImageUrl),
+    downloadImageBuffer(garmentImageUrl),
   ])
 
+  const garmentType = category === 'lower_body' ? 'pants/bottoms/shorts/skirt' : 'dress/full outfit'
+  const changeArea = category === 'lower_body'
+    ? 'lower body clothing only (pants, shorts, or skirt area)'
+    : 'the full outfit'
+
+  const prompt = `Virtual try-on: Take the person from the first image and dress them in the ${garmentType} shown in the second image. Keep the person's face, body shape, pose, skin tone, and background exactly the same. Only change ${changeArea} to match the garment. The result must look like a natural, photorealistic photo.`
+
+  const formData = new FormData()
+  formData.append('model', 'gpt-image-1')
+  formData.append('prompt', prompt)
+  formData.append('n', '1')
+  formData.append('size', '1024x1024')
+  formData.append('quality', 'medium')
+
+  const personBlob = new Blob([personBuffer], { type: 'image/png' })
+  const garmentBlob = new Blob([garmentBuffer], { type: 'image/png' })
+  formData.append('image[]', personBlob, 'person.png')
+  formData.append('image[]', garmentBlob, 'garment.png')
+
+  const response = await fetch('https://api.openai.com/v1/images/edits', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: formData,
+  })
+
+  if (!response.ok) {
+    const errorBody = await response.text()
+    console.error('OpenAI Images API error:', errorBody)
+    throw new VTOError(`OpenAI API error: ${response.status} - ${errorBody}`)
+  }
+
+  const data = await response.json()
   const generationMs = Date.now() - started
-  const data = result.data as unknown[]
-  const outputEntry = data[0]
 
-  let resultUrl: string | undefined
-  if (outputEntry && typeof outputEntry === 'object' && 'url' in outputEntry) {
-    resultUrl = (outputEntry as { url: string }).url
-  } else if (typeof outputEntry === 'string') {
-    resultUrl = outputEntry
+  const imageData = data.data?.[0]
+
+  if (imageData?.url) {
+    return { resultUrl: imageData.url, generationMs }
   }
 
-  if (!resultUrl) {
-    throw new VTOError('No result image returned from CatVTON')
+  if (imageData?.b64_json) {
+    const dataUrl = `data:image/png;base64,${imageData.b64_json}`
+    return { resultUrl: dataUrl, generationMs }
   }
 
-  return { resultUrl, generationMs }
+  throw new VTOError('OpenAI did not return a try-on image.')
 }
-
-// ---------------------------------------------------------------------------
-// Main entry point — routes to correct model based on category
-// ---------------------------------------------------------------------------
 
 export async function generateVTO(
   modelImageUrl: string,
@@ -134,14 +141,9 @@ export async function generateVTO(
   category: VTOCategory = 'upper_body',
 ): Promise<{ resultUrl: string; generationMs: number }> {
   try {
-    if (category === 'lower_body') {
-      // Use CatVTON for lower body (pants, skirts, shorts)
-      return await generateWithCatVTON(modelImageUrl, garmentImageUrl, 'lower')
-    } else if (category === 'full_body') {
-      // Use CatVTON for full body (dresses)
-      return await generateWithCatVTON(modelImageUrl, garmentImageUrl, 'overall')
+    if (category === 'lower_body' || category === 'full_body') {
+      return await generateWithOpenAI(modelImageUrl, garmentImageUrl, category)
     } else {
-      // Use IDM-VTON for upper body (tops, outerwear) — original behavior
       return await generateWithIDMVTON(modelImageUrl, garmentImageUrl)
     }
   } catch (err) {
