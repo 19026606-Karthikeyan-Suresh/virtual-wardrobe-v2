@@ -19,9 +19,7 @@ export async function DELETE() {
 
   // 2. Delete garments storage files
   try {
-    const { data: garmentFiles } = await supabase.storage
-      .from('garments')
-      .list(userId)
+    const { data: garmentFiles } = await supabase.storage.from('garments').list(userId)
     if (garmentFiles && garmentFiles.length > 0) {
       const paths = garmentFiles.map((f) => `${userId}/${f.name}`)
       await supabase.storage.from('garments').remove(paths)
@@ -32,9 +30,7 @@ export async function DELETE() {
 
   // 3. Delete vto-results storage files
   try {
-    const { data: vtoFiles } = await supabase.storage
-      .from('vto-results')
-      .list(userId)
+    const { data: vtoFiles } = await supabase.storage.from('vto-results').list(userId)
     if (vtoFiles && vtoFiles.length > 0) {
       const paths = vtoFiles.map((f) => `${userId}/${f.name}`)
       await supabase.storage.from('vto-results').remove(paths)
@@ -61,7 +57,10 @@ export async function DELETE() {
         // outfit_garments has no user_id — cascade from outfits handles it
         continue
       }
-      const { error: tableError } = await supabase.from(table).delete().eq('user_id', userId)
+      const { error: tableError } = await supabase
+        .from(table)
+        .delete()
+        .eq('user_id' as string, userId)
       if (tableError) {
         deletionErrors.push(`${table}: ${tableError.message}`)
         console.error(`Error deleting from ${table}:`, tableError)
@@ -91,7 +90,7 @@ export async function DELETE() {
   if (deletionErrors.length > 0) {
     return NextResponse.json(
       { success: false, partial: true, errors: deletionErrors },
-      { status: 207 },
+      { status: 207 }
     )
   }
 
